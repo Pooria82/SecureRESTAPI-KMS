@@ -1,0 +1,96 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{fancyhdr}
+\usepackage{setspace}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[C]{Technical Report: Secure RESTful API System}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\titleformat{\section}{\large\bfseries}{\thesection}{1em}{}
+\begin{document}
+\onehalfspacing
+
+\section*{Technical Report: Secure RESTful API with Encrypted Data Storage and Key Management}
+
+% Comprehensive description of the system architecture
+\section{System Architecture Overview}
+The system is a secure RESTful API designed to provide user authentication, secure management of sensitive data, and cryptographic key management. It is developed using the FastAPI framework, chosen for its high performance, support for asynchronous programming, and automatic OpenAPI documentation generation. Data storage is handled by MongoDB, a flexible NoSQL database that supports horizontal scalability and efficient management of structured and semi-structured data. Cryptographic key management is securely isolated using HashiCorp Vault, an industry-standard tool for managing secrets and keys.
+
+The system is deployed via Docker Compose, which facilitates the management and deployment of multiple services in isolated containers, ensuring consistency between development and production environments. The architecture consists of three main components:
+\begin{itemize}
+    \item \textbf{FastAPI Application}: Responsible for handling HTTP requests, user authentication via JWT tokens, encryption and decryption of sensitive data using user-specific keys, and interaction with MongoDB and HashiCorp Vault.
+    \item \textbf{MongoDB Database}: Stores user information (e.g., username, hashed password, salt, and two-factor authentication data) and encrypted sensitive data (including data type and encrypted value).
+    \item \textbf{HashiCorp Vault}: Manages cryptographic keys securely, including the master key and individual user keys encrypted with the master key.
+\end{itemize}
+This architecture ensures that sensitive data remains encrypted during transmission and storage, with keys managed separately and securely.
+
+% Detailed explanation of cryptographic algorithms and hashing
+\section{Cryptographic Algorithms and Hashing}
+To ensure data security and user authentication, the system employs standard cryptographic and hashing algorithms:
+\begin{itemize}
+    \item \textbf{Password Hashing}: The bcrypt algorithm with a work factor of 12 is used to hash passwords, providing strong resistance against brute-force attacks. Each user has a unique 16-byte salt generated via \texttt{secrets.token\_hex(16)} to prevent rainbow table attacks. Additionally, a global pepper stored in the \texttt{.env} file is appended to the password before hashing for extra security. The final hash is stored in the \texttt{hashed\_password} field.
+    \item \textbf{Sensitive Data Encryption}: AES-256-GCM, a symmetric encryption algorithm with authentication, is used. Each user has a unique 256-bit key, encrypted with the master key and stored in Vault. A unique 12-byte nonce is generated for each encryption operation using \texttt{secrets.token\_bytes(12)} to ensure ciphertext uniqueness.
+    \item \textbf{JWT Token Signing}: JWT tokens are signed using the HS256 (HMAC-SHA256) algorithm with a 1-hour expiration. The signing key (\texttt{JWT\_SECRET}) is securely stored in the \texttt{.env} file.
+\end{itemize}
+These algorithms were selected for their high security, standardization, and broad support in cryptographic libraries, ensuring that passwords are irretrievable, sensitive data is securely encrypted, and authentication tokens are tamper-proof.
+
+% Full description of the database structure
+\section{Database Structure}
+The MongoDB database, named \texttt{secure\_api}, consists of two main collections:
+\begin{itemize}
+    \item \textbf{\texttt{users} Collection}: Contains user information with the following fields:
+    \begin{itemize}
+        \item \texttt{\_id}: Unique identifier (ObjectId).
+        \item \texttt{username}: Unique username.
+        \item \texttt{email}: Email address for two-factor authentication.
+        \item \texttt{hashed\_password}: Bcrypt hash of the password with salt and pepper.
+        \item \texttt{salt}: Unique 16-byte salt.
+        \item \texttt{failed\_attempts}: Count of failed login attempts (max 5).
+        \item \texttt{last\_failed\_attempt\_time}: Timestamp of the last failed attempt for a 15-minute lockout.
+        \item \texttt{totp\_secret}: Base32 secret for TOTP-based two-factor authentication.
+        \item \texttt{two\_factor\_enabled}: Status of two-factor authentication.
+    \end{itemize}
+    \item \textbf{\texttt{sensitive\_data} Collection}: Stores encrypted sensitive data with the following fields:
+    \begin{itemize}
+        \item \texttt{\_id}: Unique identifier (ObjectId).
+        \item \texttt{user\_id}: Reference to the user's \texttt{\_id} in the \texttt{users} collection.
+        \item \texttt{data\_type}: Type of sensitive data (e.g., "card\_number").
+        \item \texttt{encrypted\_value}: Hex-encoded encrypted data (including nonce and ciphertext).
+    \end{itemize}
+\end{itemize}
+This structure ensures the separation of authentication and sensitive data, guaranteeing secure and encrypted storage.
+
+% Comprehensive explanation of key management
+\section{Key Management}
+Key management is handled using HashiCorp Vault as follows:
+\begin{itemize}
+    \item \textbf{Master Key}: A 256-bit AES key stored at \texttt{kv/master\_key} in Vault. It is used to encrypt and decrypt user-specific keys and is automatically generated and stored if not present.
+    \item \textbf{User Keys}: Each user has a unique 256-bit AES key generated during registration, encrypted with the master key, and stored with a nonce at \texttt{kv/user\_keys/<username>} in Vault.
+    \item \textbf{Key Rotation}: The \texttt{/rotate-master-key} endpoint performs key rotation by:
+    \begin{enumerate}
+        \item Retrieving the old master key.
+        \item Generating a new master key.
+        \item Decrypting each user's key with the old master key and re-encrypting it with the new one.
+        \item Updating the master key in Vault.
+    \end{enumerate}
+\end{itemize}
+This method ensures key security and allows key rotation without altering sensitive data.
+
+% Explanation of tool and method selection
+\section{Tool and Method Selection}
+The tools and methods were chosen based on the following criteria:
+\begin{itemize}
+    \item \textbf{FastAPI}: Selected for its high performance, asynchronous support, automatic OpenAPI documentation, and data validation with Pydantic, making it ideal for secure and scalable API development.
+    \item \textbf{MongoDB}: Chosen as a NoSQL database for its flexibility in handling structured and semi-structured data, and seamless integration with FastAPI via the \texttt{motor} library.
+    \item \textbf{HashiCorp Vault}: Selected for its high security, access control, and key rotation capabilities as an industry-standard tool.
+    \item \textbf{Docker Compose}: Used for easy deployment and management of multi-container services, ensuring environment consistency.
+    \item \textbf{Cryptography Library}: Employed for its secure and tested implementation of cryptographic algorithms like AES-256-GCM.
+\end{itemize}
+This combination of tools and methods provides a secure, scalable, and maintainable system that meets all project requirements.
+
+\end{document}
