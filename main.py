@@ -41,7 +41,10 @@ async def verify_otp_route(otp_verify: OTPVerify, db=Depends(get_db)):
 async def store_sensitive_data(data: SensitiveDataCreate, current_user=Depends(get_current_user), db=Depends(get_db)):
     if data.data_type == "card_number" and not re.match(r'^\d{16}$', data.value):
         raise HTTPException(status_code=400, detail="Invalid card number")
-    encryption_key = get_user_key(current_user["username"])
+    try:
+        encryption_key = get_user_key(current_user["username"])
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail="Encryption key not found for user")
     encrypted_value = encrypt_data(data.value, encryption_key)
     sensitive_data = {
         "user_id": current_user["_id"],
@@ -55,13 +58,19 @@ async def store_sensitive_data(data: SensitiveDataCreate, current_user=Depends(g
 # Retrieve Sensitive Data
 @app.get("/sensitive-data", response_model=List[SensitiveDataResponse], summary="Retrieve all sensitive data for the user")
 async def get_sensitive_data(current_user=Depends(get_current_user), db=Depends(get_db)):
-    encryption_key = get_user_key(current_user["username"])
+    try:
+        encryption_key = get_user_key(current_user["username"])
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail="Encryption key not found for user")
     collection = await get_sensitive_data_collection(db)
     sensitive_data_list = await collection.find({"user_id": current_user["_id"]}).to_list(None)
     decrypted_data = []
     for data in sensitive_data_list:
-        decrypted_value = decrypt_data(bytes.fromhex(data["encrypted_value"]), encryption_key)
-        decrypted_data.append(SensitiveDataResponse(id=str(data["_id"]), data_type=data["data_type"], value=decrypted_value))
+        try:
+            decrypted_value = decrypt_data(bytes.fromhex(data["encrypted_value"]), encryption_key)
+            decrypted_data.append(SensitiveDataResponse(id=str(data["_id"]), data_type=data["data_type"], value=decrypted_value))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to decrypt data: {str(e)}")
     return decrypted_data
 
 # Update Sensitive Data
@@ -69,7 +78,10 @@ async def get_sensitive_data(current_user=Depends(get_current_user), db=Depends(
 async def update_sensitive_data(data_id: str, data: SensitiveDataUpdate, current_user=Depends(get_current_user), db=Depends(get_db)):
     if data.data_type == "card_number" and not re.match(r'^\d{16}$', data.value):
         raise HTTPException(status_code=400, detail="Invalid card number")
-    encryption_key = get_user_key(current_user["username"])
+    try:
+        encryption_key = get_user_key(current_user["username"])
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail="Encryption key not found for user")
     encrypted_value = encrypt_data(data.value, encryption_key)
     collection = await get_sensitive_data_collection(db)
     result = await collection.update_one(
