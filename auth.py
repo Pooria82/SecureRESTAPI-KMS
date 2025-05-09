@@ -16,6 +16,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+
 async def register_user(user: UserCreate, db=Depends(get_db)):
     user_collection = await get_user_collection(db)
     if await user_collection.find_one({"username": user.username}):
@@ -37,21 +38,37 @@ async def register_user(user: UserCreate, db=Depends(get_db)):
     })
     return {"message": "User registered successfully"}
 
+
 async def login_user(user: UserLogin, db=Depends(get_db)):
     user_collection = await get_user_collection(db)
     db_user = await user_collection.find_one({"username": user.username})
     if not db_user:
         raise HTTPException(status_code=400, detail="Invalid username or password")
-    if db_user["failed_attempts"] >= 5 and (datetime.now(timezone.utc) - db_user["last_failed_attempt_time"]).seconds < 900:
-        raise HTTPException(status_code=400, detail="Too many failed attempts. Try again later.")
+
+    # Check for too many failed attempts
+    if db_user["failed_attempts"] >= 5:
+        if db_user["last_failed_attempt_time"] is not None:
+            time_since_last_attempt = (datetime.now(timezone.utc) - db_user["last_failed_attempt_time"]).seconds
+            if time_since_last_attempt < 900:
+                raise HTTPException(status_code=400, detail="Too many failed attempts. Try again later.")
+        else:
+            # If last_failed_attempt_time is None, treat it as no recent failed attempts
+            await user_collection.update_one({"_id": db_user["_id"]}, {"$set": {"failed_attempts": 0}})
+
     if not pwd_context.verify(user.password + db_user["salt"] + settings.pepper, db_user["hashed_password"]):
-        await user_collection.update_one({"_id": db_user["_id"]}, {"$inc": {"failed_attempts": 1}, "$set": {"last_failed_attempt_time": datetime.now(timezone.utc)}})
+        await user_collection.update_one({"_id": db_user["_id"]}, {"$inc": {"failed_attempts": 1}, "$set": {
+            "last_failed_attempt_time": datetime.now(timezone.utc)}})
         raise HTTPException(status_code=400, detail="Invalid username or password")
+
     await user_collection.update_one({"_id": db_user["_id"]}, {"$set": {"failed_attempts": 0}})
+
     if db_user["two_factor_enabled"]:
         return {"message": "2FA required", "username": user.username}
-    token = jwt.encode({"sub": user.username, "exp": datetime.now(timezone.utc) + timedelta(hours=1)}, settings.jwt_secret, algorithm="HS256")
+
+    token = jwt.encode({"sub": user.username, "exp": datetime.now(timezone.utc) + timedelta(hours=1)},
+                       settings.jwt_secret, algorithm="HS256")
     return {"access_token": token, "token_type": "bearer"}
+
 
 async def get_current_user(token: str = Depends(oauth2_scheme), db=Depends(get_db)):
     try:
@@ -67,6 +84,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db=Depends(get_d
         raise HTTPException(status_code=401, detail="User not found")
     return user
 
+
 async def send_otp(otp_request: OTPRequest, db=Depends(get_db)):
     user_collection = await get_user_collection(db)
     db_user = await user_collection.find_one({"username": otp_request.username})
@@ -78,11 +96,17 @@ async def send_otp(otp_request: OTPRequest, db=Depends(get_db)):
     msg["Subject"] = "Your OTP Code"
     msg["From"] = settings.email_from
     msg["To"] = db_user["email"]
-    with smtplib.SMTP(settings.smtp_server, settings.smtp_port) as server:
-        server.starttls()
-        server.login(settings.smtp_username, settings.smtp_password)
-        server.send_message(msg)
+    try:
+        with smtplib.SMTP(settings.smtp_server, settings.smtp_port) as server:
+            server.starttls()
+            server.login(settings.smtp_username, settings.smtp_password)
+            server.send_message(msg)
+    except smtplib.SMTPRecipientsRefused:
+        raise HTTPException(status_code=400, detail=f"Failed to send OTP: Invalid email address {db_user['email']}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to send OTP due to server error")
     return {"message": "OTP sent to your email"}
+
 
 async def verify_otp(otp_verify: OTPVerify, db=Depends(get_db)):
     user_collection = await get_user_collection(db)
@@ -90,7 +114,12 @@ async def verify_otp(otp_verify: OTPVerify, db=Depends(get_db)):
     if not db_user:
         raise HTTPException(status_code=400, detail="User not found")
     totp = pyotp.TOTP(db_user["totp_secret"])
-    if not totp.verify(otp_verify.otp):
+    if not totp.verify(otp_verify.otp, valid_window=1):
         raise HTTPException(status_code=400, detail="Invalid OTP")
-    token = jwt.encode({"sub": otp_verify.username, "exp": datetime.now(timezone.utc) + timedelta(hours=1)}, settings.jwt_secret, algorithm="HS256")
+
+    # Enable two-factor authentication after successful OTP verification
+    await user_collection.update_one({"_id": db_user["_id"]}, {"$set": {"two_factor_enabled": True}})
+
+    token = jwt.encode({"sub": otp_verify.username, "exp": datetime.now(timezone.utc) + timedelta(hours=1)},
+                       settings.jwt_secret, algorithm="HS256")
     return {"access_token": token, "token_type": "bearer"}
