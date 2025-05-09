@@ -1,358 +1,395 @@
-# Secure API Project Documentation
+# Secure RESTful API with Encrypted Data Storage and Key Management
 
-This document provides a comprehensive guide for testing the Secure API project using Postman, verifying the MongoDB database with `mongosh`, and checking HashiCorp Vault via its UI and terminal commands. It includes step-by-step instructions for testing all endpoints and functionalities, expected inputs and outputs, and their meanings. Additionally, it covers the system architecture, encryption and hashing algorithms, database structure, key management, and the rationale behind tool and method choices.
+This project implements a secure RESTful API designed to handle user authentication, sensitive data management, and key rotation while ensuring the confidentiality, integrity, and security of data during transmission and storage. Sensitive information is encrypted before being stored, and encryption keys are managed securely using HashiCorp Vault. The API is built with FastAPI, uses MongoDB for data storage, and is orchestrated with Docker Compose.
 
 ---
 
 ## Table of Contents
 
-1. [System Architecture](#system-architecture)
-2. [Encryption and Hashing Algorithms](#encryption-and-hashing-algorithms)
+1. [Architecture Overview](#architecture-overview)
+2. [Cryptographic Algorithms and Hashing](#cryptographic-algorithms-and-hashing)
 3. [Database Structure](#database-structure)
 4. [Key Management](#key-management)
-5. [Tool and Method Selection Rationale](#tool-and-method-selection-rationale)
-6. [Testing the API with Postman](#testing-the-api-with-postman)
+5. [Tool and Method Selection](#tool-and-method-selection)
+6. [Setup and Testing Instructions](#setup-and-testing-instructions)
    - [Prerequisites](#prerequisites)
-   - [Testing User Registration](#testing-user-registration)
-   - [Testing User Login](#testing-user-login)
-   - [Testing OTP-based 2FA](#testing-otp-based-2fa)
-   - [Testing Sensitive Data Management](#testing-sensitive-data-management)
-   - [Testing Master Key Rotation](#testing-master-key-rotation)
-7. [Database and Vault Verification](#database-and-vault-verification)
-   - [MongoDB Verification](#mongodb-verification)
-   - [Vault Verification](#vault-verification)
+   - [Step-by-Step Setup](#step-by-step-setup)
+   - [Testing with Postman](#testing-with-postman)
+   - [Checking the Database](#checking-the-database)
+   - [Vault UI Verification](#vault-ui-verification)
+7. [Conclusion](#conclusion)
 
 ---
 
-## System Architecture
+## Architecture Overview
 
-The Secure API is built using FastAPI, a high-performance Python web framework, integrated with MongoDB for data storage and HashiCorp Vault for secure key management. The system is containerized with Docker, comprising three services:
+The system is composed of three core components orchestrated by Docker Compose:
 
-- **API Service (`securerestapi-kms-app-1`)**: Manages user authentication, sensitive data operations, and key rotation. Runs on port `8000`.
-- **MongoDB (`securerestapi-kms-mongo-1`)**: Stores user credentials and encrypted sensitive data. Runs on port `27017`.
-- **Vault (`securerestapi-kms-vault-1`)**: Handles encryption keys securely. Runs on port `8200`.
+- **FastAPI Application**:
+  - Built with FastAPI, a high-performance, asynchronous Python web framework.
+  - Handles HTTP requests and responses for user registration, login, sensitive data operations, and key rotation.
+  - Implements JWT-based authentication for secure user sessions.
+  - Encrypts and decrypts sensitive data using user-specific keys retrieved from Vault.
 
-Authentication is handled via JWT (JSON Web Tokens), with bcrypt for password hashing, AES-256-GCM for sensitive data encryption, and TOTP (Time-based One-Time Passwords) for two-factor authentication (2FA).
+- **MongoDB**:
+  - A NoSQL database used to store user credentials and encrypted sensitive data.
+  - Employs two collections: `users` for authentication data and `sensitive_data` for encrypted user information.
+  - Integrated asynchronously with FastAPI via the `motor` library.
+
+- **HashiCorp Vault**:
+  - Acts as a secure key management system (KMS).
+  - Stores the master encryption key and user-specific encryption keys, ensuring they are isolated from the application and database.
+  - Provides key generation, storage, and rotation capabilities.
+
+**Interaction**:
+- The FastAPI application authenticates users, retrieves encryption keys from Vault, and stores encrypted data in MongoDB.
+- Docker Compose ensures seamless deployment and interaction between these services, providing a consistent environment.
+
+This architecture ensures that sensitive data is encrypted at rest and in transit, with keys managed securely outside the application logic.
 
 ---
 
-## Encryption and Hashing Algorithms
+## Cryptographic Algorithms and Hashing
 
-- **Password Hashing**: 
-  - Algorithm: Bcrypt with a unique salt per user and a global pepper (from `.env`).
-  - Purpose: Ensures passwords are securely stored and resistant to brute-force attacks.
-- **Sensitive Data Encryption**: 
-  - Algorithm: AES-256-GCM.
-  - Purpose: Provides authenticated encryption for confidentiality and integrity of sensitive data (e.g., card numbers).
-- **Key Encryption**: 
-  - Algorithm: AES-256-GCM.
-  - Purpose: Encrypts user-specific keys with a master key stored in Vault.
-- **JWT Signing**: 
-  - Algorithm: HS256 (HMAC with SHA-256).
-  - Purpose: Secures JWT tokens for user authentication.
+The project employs robust, industry-standard cryptographic techniques:
+
+- **Password Hashing**:
+  - **Algorithm**: `bcrypt` with a work factor of 12 for computational resistance to brute-force attacks.
+  - **Salt**: A unique 16-byte salt generated per user using `secrets.token_hex(16)` to prevent rainbow table attacks.
+  - **Pepper**: A global secret (`PEPPER`) stored in the `.env` file, appended to passwords before hashing for an additional layer of security.
+  - **Storage**: Only the resulting hash is stored in the `hashed_password` field of the `users` collection.
+
+- **Data Encryption**:
+  - **Algorithm**: AES-256-GCM, a symmetric encryption standard with authenticated encryption.
+  - **Key**: Each user has a unique 256-bit encryption key, generated during registration and encrypted with the master key.
+  - **Nonce**: A unique 12-byte nonce generated per encryption operation using `secrets.token_bytes(12)` to ensure ciphertext uniqueness.
+  - **Implementation**: Provided by the `cryptography` library’s `AESGCM` module.
+
+- **Key Management**:
+  - **Master Key**: A 256-bit AES key stored in Vault at `kv/master_key`, used to encrypt user-specific keys.
+  - **User Keys**: Encrypted with the master key using AES-256-GCM and stored in Vault at `kv/user_keys/<username>` with associated nonces.
+
+- **JWT Signing**:
+  - **Algorithm**: HS256 (HMAC with SHA-256).
+  - **Secret**: A securely generated `JWT_SECRET` stored in the `.env` file.
+  - **Expiration**: Tokens expire after 1 hour, enforced by the `exp` claim.
+
+These choices ensure passwords are irretrievable, sensitive data is securely encrypted, and authentication tokens are tamper-proof.
 
 ---
 
 ## Database Structure
 
-MongoDB uses two collections:
+The MongoDB database (`secure_api`) is structured with two collections:
 
-1. **users**:
-   - `_id`: ObjectId (auto-generated)
-   - `username`: String (unique identifier)
-   - `email`: String (user’s email)
-   - `hashed_password`: String (bcrypt-hashed password with salt and pepper)
-   - `salt`: String (unique per user, hex-encoded)
-   - `failed_attempts`: Integer (tracks login failures)
-   - `last_failed_attempt_time`: Date (timestamp of last failed attempt)
-   - `totp_secret`: String (base32-encoded TOTP secret for 2FA)
-   - `two_factor_enabled`: Boolean (indicates if 2FA is enabled)
+- **Users Collection (`users`)**:
+  - `_id`: ObjectId (auto-generated unique identifier).
+  - `username`: String (unique, user-provided identifier).
+  - `email`: String (user’s email for OTP-based 2FA).
+  - `hashed_password`: String (bcrypt-hashed password with salt and pepper).
+  - `salt`: String (unique 16-byte hex string for password hashing).
+  - `failed_attempts`: Integer (tracks consecutive failed login attempts, max 5 before lockout).
+  - `last_failed_attempt_time`: Date (timestamp of the last failed attempt, resets after 15 minutes).
+  - `totp_secret`: String (base32 secret for TOTP-based 2FA).
+  - `two_factor_enabled`: Boolean (indicates if 2FA is enabled).
 
-2. **sensitive_data**:
-   - `_id`: ObjectId (auto-generated)
-   - `user_id`: ObjectId (references `users._id`)
-   - `data_type`: String (e.g., "card_number")
-   - `encrypted_value`: String (hex-encoded encrypted data)
+- **Sensitive Data Collection (`sensitive_data`)**:
+  - `_id`: ObjectId (auto-generated unique identifier).
+  - `user_id`: ObjectId (foreign key referencing the user’s `_id` in `users`).
+  - `data_type`: String (e.g., `"card_number"`, describes the type of sensitive data).
+  - `encrypted_value`: String (hex-encoded encrypted data, including nonce and ciphertext).
+
+This structure separates authentication data from sensitive data, linking them via `user_id`, and ensures that sensitive data is stored in an encrypted form.
 
 ---
 
 ## Key Management
 
-- **Master Key**: 
-  - Stored in Vault at `secret/master_key`.
-  - Used to encrypt user-specific keys with AES-256-GCM.
-- **User Encryption Keys**: 
-  - Generated as AES-256 keys during user registration.
-  - Encrypted with the master key and stored in Vault at `secret/user_keys/<username>` with a nonce.
-- **Key Rotation**: 
-  - The `/rotate-master-key` endpoint generates a new master key and updates Vault.
+The key management system (KMS) is implemented using HashiCorp Vault and follows these principles:
+
+- **Master Key**:
+  - A 256-bit AES key stored at `kv/master_key` in Vault.
+  - Generated on first use if not present, using `AESGCM.generate_key(bit_length=256)`.
+  - Used to encrypt and decrypt user-specific keys.
+
+- **User Encryption Keys**:
+  - A unique 256-bit AES key is generated for each user during registration via `generate_encryption_key()`.
+  - Encrypted with the master key using AES-256-GCM and stored in Vault at `kv/user_keys/<username>` with a nonce.
+  - Retrieved and decrypted only when needed for data encryption/decryption.
+
+- **Key Rotation**:
+  - The `/rotate-master-key` endpoint generates a new master key and re-encrypts all user keys.
+  - Process:
+    1. Retrieve the old master key.
+    2. Generate a new 256-bit master key.
+    3. For each user, decrypt their key with the old master key and re-encrypt with the new one.
+    4. Update the master key in Vault.
+  - Ensures continuity without requiring re-encryption of stored data.
+
+This design ensures keys are securely stored, managed, and rotated, minimizing exposure risks even in case of database compromise.
 
 ---
 
-## Tool and Method Selection Rationale
+## Tool and Method Selection
 
-- **FastAPI**: Chosen for its asynchronous capabilities, performance, and automatic OpenAPI documentation.
-- **MongoDB**: Selected for its NoSQL flexibility and seamless integration with Python via Motor.
-- **Vault**: Provides secure, centralized key management with robust access controls.
-- **Bcrypt**: Industry-standard for password hashing, resistant to rainbow table attacks.
-- **AES-256-GCM**: Ensures both confidentiality and integrity with authenticated encryption.
-- **Docker**: Ensures consistent deployment across environments and simplifies service orchestration.
+The following tools and methods were selected for their strengths:
+
+- **FastAPI**:
+  - **Why**: High-performance, asynchronous framework with automatic OpenAPI documentation and Pydantic validation.
+  - **Benefit**: Simplifies API development and ensures type safety and input validation.
+
+- **MongoDB**:
+  - **Why**: Flexible NoSQL database supporting dynamic schemas and efficient scaling.
+  - **Benefit**: Ideal for storing varied sensitive data types and integrates seamlessly with Python via `motor`.
+
+- **HashiCorp Vault**:
+  - **Why**: Industry-standard solution for secrets and key management.
+  - **Benefit**: Provides secure storage, access control, and key rotation, isolating keys from the application.
+
+- **Docker Compose**:
+  - **Why**: Simplifies multi-container application deployment.
+  - **Benefit**: Ensures consistent environments and easy setup across development and production.
+
+- **Cryptography Library**:
+  - **Why**: Provides secure AES-256-GCM implementation.
+  - **Benefit**: Trusted, well-tested cryptographic primitives.
+
+These tools collectively deliver a secure, scalable, and developer-friendly solution.
 
 ---
 
-## Testing the API with Postman
+## Setup and Testing Instructions
 
 ### Prerequisites
 
-1. **Docker Containers**: Ensure all services are running:
-   - `securerestapi-kms-app-1` (API, port `8000`)
-   - `securerestapi-kms-mongo-1` (MongoDB, port `27017`)
-   - `securerestapi-kms-vault-1` (Vault, port `8200`)
-   - Check with: `docker ps`
-2. **Postman**: Installed and configured to send requests to `http://localhost:8000`.
-3. **Environment Variables**: Verify `.env` is set with `VAULT_TOKEN=myroot`, SMTP credentials, etc.
+- **Docker**: Required to build and run the application containers.
+- **Docker Compose**: Needed to orchestrate the services.
+- **Postman**: Used for testing API endpoints.
+- **Web Browser**: For accessing the Vault UI.
+- **Terminal**: For interacting with the MongoDB shell.
 
-### Testing User Registration
+### Step-by-Step Setup
 
-**Step 1: Register a new user**
-
-- **Endpoint**: `POST http://localhost:8000/register`
-- **Body** (raw JSON):
-  ```json
-  {
-    "username": "testuser",
-    "email": "test@example.com",
-    "password": "Test123!"
-  }
-  ```
-- **Expected Response**: Status `200 OK`
-  ```json
-  {
-    "message": "User registered successfully"
-  }
-  ```
-- **Meaning**: User is created in MongoDB, and their encryption key is stored in Vault.
-
-### Testing User Login
-
-**Step 2: Login with correct credentials**
-
-- **Endpoint**: `POST http://localhost:8000/login`
-- **Body** (raw JSON):
-  ```json
-  {
-    "username": "testuser",
-    "password": "Test123!"
-  }
-  ```
-- **Expected Response**: Status `200 OK`
-  ```json
-  {
-    "access_token": "<JWT_TOKEN>",
-    "token_type": "bearer"
-  }
-  ```
-- **Meaning**: Successful authentication returns a JWT token valid for 1 hour.
-
-**Step 3: Login with incorrect password (5 times)**
-
-- **Endpoint**: `POST http://localhost:8000/login`
-- **Body** (raw JSON):
-  ```json
-  {
-    "username": "testuser",
-    "password": "WrongPass"
-  }
-  ```
-- **Expected Response (after 5 attempts)**: Status `400 Bad Request`
-  ```json
-  {
-    "detail": "Too many failed attempts. Try again later."
-  }
-  ```
-- **Meaning**: After 5 failed attempts, the account is locked for 15 minutes.
-
-### Testing OTP-based 2FA
-
-**Step 4: Send OTP**
-
-- **Endpoint**: `POST http://localhost:8000/send-otp`
-- **Body** (raw JSON):
-  ```json
-  {
-    "username": "testuser"
-  }
-  ```
-- **Expected Response**: Status `200 OK`
-  ```json
-  {
-    "message": "OTP sent to your email"
-  }
-  ```
-- **Meaning**: A TOTP code is generated and emailed to `test@example.com`.
-
-**Step 5: Verify OTP**
-
-- **Endpoint**: `POST http://localhost:8000/verify-otp`
-- **Body** (raw JSON):
-  ```json
-  {
-    "username": "testuser",
-    "otp": "<OTP_CODE>"
-  }
-  ```
-- **Expected Response**: Status `200 OK`
-  ```json
-  {
-    "access_token": "<JWT_TOKEN>",
-    "token_type": "bearer"
-  }
-  ```
-- **Meaning**: OTP is valid, 2FA is enabled, and a JWT token is returned.
-
-### Testing Sensitive Data Management
-
-**Step 6: Store sensitive data**
-
-- **Endpoint**: `POST http://localhost:8000/sensitive-data`
-- **Headers**: `Authorization: Bearer <JWT_TOKEN>`
-- **Body** (raw JSON):
-  ```json
-  {
-    "data_type": "card_number",
-    "value": "1234567890123456"
-  }
-  ```
-- **Expected Response**: Status `200 OK`
-  ```json
-  {
-    "id": "<OBJECT_ID>",
-    "data_type": "card_number",
-    "value": "1234567890123456"
-  }
-  ```
-- **Meaning**: Data is encrypted with the user’s key and stored in MongoDB.
-
-**Step 7: Retrieve sensitive data**
-
-- **Endpoint**: `GET http://localhost:8000/sensitive-data`
-- **Headers**: `Authorization: Bearer <JWT_TOKEN>`
-- **Expected Response**: Status `200 OK`
-  ```json
-  [
-    {
-      "id": "<OBJECT_ID>",
-      "data_type": "card_number",
-      "value": "1234567890123456"
-    }
-  ]
-  ```
-- **Meaning**: Encrypted data is retrieved, decrypted, and returned.
-
-**Step 8: Update sensitive data**
-
-- **Endpoint**: `PUT http://localhost:8000/sensitive-data/<OBJECT_ID>`
-- **Headers**: `Authorization: Bearer <JWT_TOKEN>`
-- **Body** (raw JSON):
-  ```json
-  {
-    "data_type": "card_number",
-    "value": "6543210987654321"
-  }
-  ```
-- **Expected Response**: Status `200 OK`
-  ```json
-  {
-    "id": "<OBJECT_ID>",
-    "data_type": "card_number",
-    "value": "6543210987654321"
-  }
-  ```
-- **Meaning**: Data is updated, re-encrypted, and stored.
-
-**Step 9: Delete sensitive data**
-
-- **Endpoint**: `DELETE http://localhost:8000/sensitive-data/<OBJECT_ID>`
-- **Headers**: `Authorization: Bearer <JWT_TOKEN>`
-- **Expected Response**: Status `200 OK`
-  ```json
-  {
-    "message": "Data deleted successfully"
-  }
-  ```
-- **Meaning**: Data is removed from MongoDB.
-
-### Testing Master Key Rotation
-
-**Step 10: Rotate the master key**
-
-- **Endpoint**: `POST http://localhost:8000/rotate-master-key`
-- **Headers**: `Authorization: Bearer <JWT_TOKEN>`
-- **Expected Response**: Status `200 OK`
-  ```json
-  {
-    "message": "Master key rotated successfully"
-  }
-  ```
-- **Meaning**: A new master key is generated and stored in Vault.
-
----
-
-## Database and Vault Verification
-
-### MongoDB Verification
-
-1. **Access MongoDB Container**:
+1. **Clone the Repository**:
    ```bash
-   docker exec -it securerestapi-kms-mongo-1 mongosh
+   git clone <repository_url>
+   cd <repository_directory>
    ```
-2. **Switch to Database**:
-   ```javascript
-   use secure_api
-   ```
-3. **Check Users Collection**:
-   ```javascript
-   db.users.find().pretty()
-   ```
-   - **Expected Output**: Documents with fields like `username`, `hashed_password`, `salt`, `totp_secret`, etc.
-   - **Meaning**: Verifies user registration and 2FA status.
-4. **Check Sensitive Data Collection**:
-   ```javascript
-   db.sensitive_data.find().pretty()
-   ```
-   - **Expected Output**: Documents with `user_id`, `data_type`, and `encrypted_value` (hex string).
-   - **Meaning**: Confirms encrypted data storage.
 
-### Vault Verification
+2. **Configure Environment Variables**:
+   - Create a `.env` file in the project root with the following:
+     ```
+     MONGODB_URL=mongodb://mongo:27017
+     DB_NAME=secure_api
+     JWT_SECRET=<secure_random_string>
+     PEPPER=<secure_random_string>
+     VAULT_TOKEN=<vault_token>
+     SMTP_SERVER=smtp.gmail.com
+     SMTP_PORT=587
+     SMTP_USERNAME=<your_smtp_username>
+     SMTP_PASSWORD=<your_smtp_password>
+     EMAIL_FROM=<your_email>
+     ```
+   - Replace placeholders:
+     - `JWT_SECRET`: Generate with `openssl rand -base64 32`.
+     - `PEPPER`: Generate with `openssl rand -base64 16`.
+     - `VAULT_TOKEN`: Use a secure token (e.g., `myroot` for development).
+     - SMTP fields: Use a valid email service account (e.g., Gmail with an App Password).
 
-1. **Via Vault UI**:
-   - Open `http://localhost:8200`.
-   - Log in with token `myroot` (from `.env`).
-   - Navigate to `secret/master_key`:
-     - **Expected Output**: Key stored as a hex string.
-     - **Meaning**: Master key is present.
-   - Navigate to `secret/user_keys/testuser`:
-     - **Expected Output**: Encrypted key and nonce as hex strings.
-     - **Meaning**: User key is securely stored.
+3. **Build and Run the Application**:
+   ```bash
+   docker-compose up --build
+   ```
+   - Builds the FastAPI app, MongoDB, and Vault containers.
+   - API runs at `http://localhost:8000`.
+   - Vault UI is accessible at `http://localhost:8200`.
 
-2. **Via Terminal**:
-   - Access Vault container:
+4. **Verify Services**:
+   - Check Docker containers:
      ```bash
-     docker exec -it securerestapi-kms-vault-1 /bin/sh
+     docker ps
      ```
-   - List secrets:
-     ```bash
-     vault kv list secret
+   - Ensure `app`, `mongo`, and `vault` are running.
+
+### Testing with Postman
+
+Use Postman to test all endpoints. Save the `access_token` from login for authenticated requests.
+
+1. **Register a User**:
+   - **Method**: POST
+   - **URL**: `http://localhost:8000/register`
+   - **Body** (raw JSON):
+     ```json
+     {
+       "username": "testuser",
+       "email": "test@example.com",
+       "password": "StrongP@ssw0rd1!"
+     }
      ```
-     - **Expected Output**: `master_key`, `user_keys/testuser`, etc.
-     - **Meaning**: Confirms stored keys.
-   - Retrieve user key:
-     ```bash
-     vault kv get secret/user_keys/testuser
+   - **Expected Response** (200 OK):
+     ```json
+     {"message": "User registered successfully"}
      ```
-     - **Expected Output**: JSON with `key` and `nonce` fields.
-     - **Meaning**: Verifies key storage details.
+   - **Notes**: Password must be ≥8 characters, with uppercase, digit, and special character.
+
+2. **Login**:
+   - **Method**: POST
+   - **URL**: `http://localhost:8000/login`
+   - **Body** (raw JSON):
+     ```json
+     {
+       "username": "testuser",
+       "password": "StrongP@ssw0rd1!"
+     }
+     ```
+   - **Expected Response** (200 OK):
+     ```json
+     {
+       "access_token": "<token>",
+       "token_type": "bearer"
+     }
+     ```
+   - **Notes**: After 5 failed attempts, login is locked for 15 minutes.
+
+3. **Store Sensitive Data**:
+   - **Method**: POST
+   - **URL**: `http://localhost:8000/sensitive-data`
+   - **Headers**: `Authorization: Bearer <access_token>`
+   - **Body** (raw JSON):
+     ```json
+     {
+       "data_type": "card_number",
+       "value": "1234567812345678"
+     }
+     ```
+   - **Expected Response** (200 OK):
+     ```json
+     {
+       "id": "<data_id>",
+       "data_type": "card_number",
+       "value": "1234567812345678"
+     }
+     ```
+   - **Notes**: Card numbers must be 16 digits.
+
+4. **Retrieve Sensitive Data**:
+   - **Method**: GET
+   - **URL**: `http://localhost:8000/sensitive-data`
+   - **Headers**: `Authorization: Bearer <access_token>`
+   - **Expected Response** (200 OK):
+     ```json
+     [
+       {
+         "id": "<data_id>",
+         "data_type": "card_number",
+         "value": "1234567812345678"
+       }
+     ]
+     ```
+
+5. **Update Sensitive Data**:
+   - **Method**: PUT
+   - **URL**: `http://localhost:8000/sensitive-data/<data_id>`
+   - **Headers**: `Authorization: Bearer <access_token>`
+   - **Body** (raw JSON):
+     ```json
+     {
+       "data_type": "card_number",
+       "value": "8765432187654321"
+     }
+     ```
+   - **Expected Response** (200 OK):
+     ```json
+     {
+       "id": "<data_id>",
+       "data_type": "card_number",
+       "value": "8765432187654321"
+     }
+     ```
+
+6. **Delete Sensitive Data**:
+   - **Method**: DELETE
+   - **URL**: `http://localhost:8000/sensitive-data/<data_id>`
+   - **Headers**: `Authorization: Bearer <access_token>`
+   - **Expected Response** (200 OK):
+     ```json
+     {"message": "Data deleted successfully"}
+     ```
+
+7. **Rotate Master Key**:
+   - **Method**: POST
+   - **URL**: `http://localhost:8000/rotate-master-key`
+   - **Headers**: `Authorization: Bearer <access_token>`
+   - **Expected Response** (200 OK):
+     ```json
+     {"message": "Master key rotated successfully"}
+     ```
+   - **Notes**: Verifies key rotation without data re-encryption.
+
+8. **Enable 2FA**:
+   - **Step 1: Send OTP**:
+     - **Method**: POST
+     - **URL**: `http://localhost:8000/send-otp`
+     - **Body** (raw JSON):
+       ```json
+       {
+         "username": "testuser"
+       }
+       ```
+     - **Expected Response** (200 OK):
+       ```json
+       {"message": "OTP sent to your email"}
+       ```
+     - **Notes**: Check the email for the 6-digit OTP.
+   - **Step 2: Verify OTP**:
+     - **Method**: POST
+     - **URL**: `http://localhost:8000/verify-otp`
+     - **Body** (raw JSON):
+       ```json
+       {
+         "username": "testuser",
+         "otp": "<otp_code>"
+       }
+       ```
+     - **Expected Response** (200 OK):
+       ```json
+       {
+         "access_token": "<token>",
+         "token_type": "bearer"
+       }
+       ```
+     - **Notes**: Enables 2FA for subsequent logins.
+
+### Checking the Database
+
+Access the MongoDB shell to verify data:
+```bash
+docker exec -it securerestapi-kms-mongo-1 mongosh
+use secure_api
+```
+
+- **Users Collection**:
+  ```bash
+  db.users.find().pretty()
+  ```
+  - Check: `hashed_password` is a bcrypt hash, `salt` is unique, `totp_secret` is present.
+
+- **Sensitive Data Collection**:
+  ```bash
+  db.sensitive_data.find().pretty()
+  ```
+  - Check: `encrypted_value` is a hex string, not plain text.
+
+### Vault UI Verification
+
+- Open `http://localhost:8200` in a browser.
+- Log in with the `VAULT_TOKEN` from `.env` (e.g., `myroot`).
+- Navigate to:
+  - `kv/master_key`: Verify the master key exists as a hex string.
+  - `kv/user_keys/testuser`: Confirm the encrypted user key and nonce are stored.
 
 ---
 
-This guide ensures a thorough test of the Secure API project, validating functionality, security, and integration with MongoDB and Vault.
+## Conclusion
+
+This project delivers a secure, production-ready RESTful API that meets all specified requirements. It provides robust user authentication with JWT and 2FA, encrypted storage of sensitive data using AES-256-GCM, and secure key management with HashiCorp Vault. The use of FastAPI, MongoDB, and Docker Compose ensures scalability, maintainability, and ease of deployment. The implementation adheres to security best practices, making it suitable for environments where data protection is paramount.

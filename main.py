@@ -2,8 +2,8 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from models import UserCreate, UserLogin, SensitiveDataCreate, SensitiveDataResponse, SensitiveDataUpdate, OTPRequest, OTPVerify
 from auth import register_user, login_user, get_current_user, send_otp, verify_otp
-from kms import encrypt_data, decrypt_data, get_user_key, rotate_master_key
-from database import get_db, get_sensitive_data_collection
+from kms import encrypt_data, decrypt_data, get_user_key, client, get_master_key, generate_new_master_key, re_encrypt_user_key
+from database import get_db, get_sensitive_data_collection, get_user_collection
 from bson import ObjectId
 import re
 from typing import List
@@ -16,27 +16,22 @@ app = FastAPI(
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
-# User Registration
 @app.post("/register", summary="Register a new user")
 async def register(user: UserCreate, db=Depends(get_db)):
     return await register_user(user, db)
 
-# User Login
 @app.post("/login", summary="Login and get access token")
 async def login(user: UserLogin, db=Depends(get_db)):
     return await login_user(user, db)
 
-# Send OTP for 2FA
 @app.post("/send-otp", summary="Send OTP for two-factor authentication")
 async def send_otp_route(otp_request: OTPRequest, db=Depends(get_db)):
     return await send_otp(otp_request, db)
 
-# Verify OTP for 2FA
 @app.post("/verify-otp", summary="Verify OTP and get access token")
 async def verify_otp_route(otp_verify: OTPVerify, db=Depends(get_db)):
     return await verify_otp(otp_verify, db)
 
-# Store Sensitive Data
 @app.post("/sensitive-data", response_model=SensitiveDataResponse, summary="Store encrypted sensitive data")
 async def store_sensitive_data(data: SensitiveDataCreate, current_user=Depends(get_current_user), db=Depends(get_db)):
     if data.data_type == "card_number" and not re.match(r'^\d{16}$', data.value):
@@ -55,7 +50,6 @@ async def store_sensitive_data(data: SensitiveDataCreate, current_user=Depends(g
     result = await collection.insert_one(sensitive_data)
     return SensitiveDataResponse(id=str(result.inserted_id), data_type=data.data_type, value=data.value)
 
-# Retrieve Sensitive Data
 @app.get("/sensitive-data", response_model=List[SensitiveDataResponse], summary="Retrieve all sensitive data for the user")
 async def get_sensitive_data(current_user=Depends(get_current_user), db=Depends(get_db)):
     try:
@@ -73,7 +67,6 @@ async def get_sensitive_data(current_user=Depends(get_current_user), db=Depends(
             raise HTTPException(status_code=500, detail=f"Failed to decrypt data: {str(e)}")
     return decrypted_data
 
-# Update Sensitive Data
 @app.put("/sensitive-data/{data_id}", response_model=SensitiveDataResponse, summary="Update existing sensitive data")
 async def update_sensitive_data(data_id: str, data: SensitiveDataUpdate, current_user=Depends(get_current_user), db=Depends(get_db)):
     if data.data_type == "card_number" and not re.match(r'^\d{16}$', data.value):
@@ -92,7 +85,6 @@ async def update_sensitive_data(data_id: str, data: SensitiveDataUpdate, current
         raise HTTPException(status_code=404, detail="Data not found or not authorized")
     return SensitiveDataResponse(id=data_id, data_type=data.data_type, value=data.value)
 
-# Delete Sensitive Data
 @app.delete("/sensitive-data/{data_id}", summary="Delete sensitive data")
 async def delete_sensitive_data(data_id: str, current_user=Depends(get_current_user), db=Depends(get_db)):
     collection = await get_sensitive_data_collection(db)
@@ -101,8 +93,14 @@ async def delete_sensitive_data(data_id: str, current_user=Depends(get_current_u
         raise HTTPException(status_code=404, detail="Data not found or not authorized")
     return {"message": "Data deleted successfully"}
 
-# Rotate Master Key (KMS)
 @app.post("/rotate-master-key", summary="Rotate the master encryption key in Vault")
-async def rotate_key(current_user=Depends(get_current_user)):
-    old_key, new_key = rotate_master_key()
+async def rotate_key(current_user=Depends(get_current_user), db=Depends(get_db)):
+    old_master_key = get_master_key()
+    new_master_key = generate_new_master_key()
+    user_collection = await get_user_collection(db)
+    users = await user_collection.find().to_list(None)
+    for user in users:
+        username = user["username"]
+        re_encrypt_user_key(username, old_master_key, new_master_key)
+    client.secrets.kv.v2.create_or_update_secret(path='master_key', secret={'key': new_master_key.hex()})
     return {"message": "Master key rotated successfully"}
