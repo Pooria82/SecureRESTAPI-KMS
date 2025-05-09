@@ -1,8 +1,9 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, EmailStr
 import re
 
 class UserCreate(BaseModel):
     username: str
+    email: EmailStr
     password: str
 
     @field_validator('password')
@@ -27,6 +28,7 @@ class SensitiveDataCreate(BaseModel):
     value: str
 
 class SensitiveDataResponse(BaseModel):
+    id: str
     data_type: str
     value: str
 

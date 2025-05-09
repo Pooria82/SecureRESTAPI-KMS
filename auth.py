@@ -27,6 +27,7 @@ async def register_user(user: UserCreate, db=Depends(get_db)):
     totp_secret = pyotp.random_base32()
     await user_collection.insert_one({
         "username": user.username,
+        "email": user.email,
         "hashed_password": hashed_password,
         "salt": salt,
         "failed_attempts": 0,
@@ -76,7 +77,7 @@ async def send_otp(otp_request: OTPRequest, db=Depends(get_db)):
     msg = MIMEText(f"Your OTP code is: {otp}")
     msg["Subject"] = "Your OTP Code"
     msg["From"] = settings.email_from
-    msg["To"] = otp_request.username
+    msg["To"] = db_user["email"]
     with smtplib.SMTP(settings.smtp_server, settings.smtp_port) as server:
         server.starttls()
         server.login(settings.smtp_username, settings.smtp_password)

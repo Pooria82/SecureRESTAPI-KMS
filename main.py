@@ -4,6 +4,7 @@ from models import UserCreate, UserLogin, SensitiveDataCreate, SensitiveDataResp
 from auth import register_user, login_user, get_current_user, send_otp, verify_otp
 from kms import encrypt_data, decrypt_data, get_user_key, rotate_master_key
 from database import get_db, get_sensitive_data_collection
+from bson import ObjectId
 import re
 from typing import List
 
@@ -45,12 +46,11 @@ async def store_sensitive_data(data: SensitiveDataCreate, current_user=Depends(g
     sensitive_data = {
         "user_id": current_user["_id"],
         "data_type": data.data_type,
-        "encrypted_value": encrypted_value.hex()  # Store as hex for easier debugging
+        "encrypted_value": encrypted_value.hex()
     }
     collection = await get_sensitive_data_collection(db)
     result = await collection.insert_one(sensitive_data)
-    sensitive_data["_id"] = str(result.inserted_id)
-    return SensitiveDataResponse(data_type=data.data_type, value=data.value)
+    return SensitiveDataResponse(id=str(result.inserted_id), data_type=data.data_type, value=data.value)
 
 # Retrieve Sensitive Data
 @app.get("/sensitive-data", response_model=List[SensitiveDataResponse], summary="Retrieve all sensitive data for the user")
@@ -61,7 +61,7 @@ async def get_sensitive_data(current_user=Depends(get_current_user), db=Depends(
     decrypted_data = []
     for data in sensitive_data_list:
         decrypted_value = decrypt_data(bytes.fromhex(data["encrypted_value"]), encryption_key)
-        decrypted_data.append(SensitiveDataResponse(data_type=data["data_type"], value=decrypted_value))
+        decrypted_data.append(SensitiveDataResponse(id=str(data["_id"]), data_type=data["data_type"], value=decrypted_value))
     return decrypted_data
 
 # Update Sensitive Data
@@ -73,18 +73,18 @@ async def update_sensitive_data(data_id: str, data: SensitiveDataUpdate, current
     encrypted_value = encrypt_data(data.value, encryption_key)
     collection = await get_sensitive_data_collection(db)
     result = await collection.update_one(
-        {"_id": data_id, "user_id": current_user["_id"]},
+        {"_id": ObjectId(data_id), "user_id": current_user["_id"]},
         {"$set": {"data_type": data.data_type, "encrypted_value": encrypted_value.hex()}}
     )
     if result.modified_count == 0:
         raise HTTPException(status_code=404, detail="Data not found or not authorized")
-    return SensitiveDataResponse(data_type=data.data_type, value=data.value)
+    return SensitiveDataResponse(id=data_id, data_type=data.data_type, value=data.value)
 
 # Delete Sensitive Data
 @app.delete("/sensitive-data/{data_id}", summary="Delete sensitive data")
 async def delete_sensitive_data(data_id: str, current_user=Depends(get_current_user), db=Depends(get_db)):
     collection = await get_sensitive_data_collection(db)
-    result = await collection.delete_one({"_id": data_id, "user_id": current_user["_id"]})
+    result = await collection.delete_one({"_id": ObjectId(data_id), "user_id": current_user["_id"]})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Data not found or not authorized")
     return {"message": "Data deleted successfully"}
